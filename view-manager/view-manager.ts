@@ -102,8 +102,13 @@ const ViewManager = {
    */
   draw(): void {
     if (!isLoadingNextView) {
+      push();
       currentView?.draw();
+      pop();
+
+      push();
       popupView?.draw();
+      pop();
     }
 
     if (tFade < 1) {
