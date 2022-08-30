@@ -2,7 +2,7 @@ import { assert } from '../debug.js';
 import PopupView from './popup-view.js';
 import View from './view.js';
 
-const FADE_TIME = 0.5;
+const FADE_TIME = 0.25;
 
 let currentView: View | null = null;
 let popupView: PopupView | null = null;
@@ -116,7 +116,13 @@ const ViewManager = {
     }
 
     if (isLoadingNextView === true) {
-      (drawCustomLoadingView ?? drawDefaultLoadingView)();
+      if (currentView?.drawLoadingView !== undefined) {
+        currentView.drawLoadingView();
+      } else if (drawCustomLoadingView !== null) {
+        drawCustomLoadingView();
+      } else {
+        drawDefaultLoadingView();
+      }
     }
   },
 };

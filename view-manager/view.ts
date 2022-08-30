@@ -21,6 +21,8 @@ export default abstract class View {
 
   async loadContent?(): Promise<void>;
 
+  drawLoadingView?(): void;
+
   onFocusChanged?(hasFocus: boolean): void;
 
   update?(): void;
