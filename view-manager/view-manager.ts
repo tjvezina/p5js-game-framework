@@ -91,7 +91,7 @@ const ViewManager = {
       }
     }
 
-    if (document.hasFocus()) {
+    if (!isLoadingNextView) {
       currentView?.update?.();
       popupView?.update?.();
     }
