@@ -94,10 +94,6 @@ const InputManager = {
  * @param event The associated Event object
  */
 async function tryDispatchEvent(eventType: InputEventType, event?: Event): Promise<void> {
-  // Dynamic import to avoid circular dependency
-  const ViewManager = (await import('./view-manager/view-manager.js')).default;
-
-  if (ViewManager.isInTransition) return;
   if (pointerLockIsRequired && !InputManager.hasPointerLock) return;
 
   listenerMap.get(eventType)?.forEach(listener => (listener[eventType] as InputEventCallback).apply(listener, event));

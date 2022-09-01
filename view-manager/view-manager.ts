@@ -1,171 +1,222 @@
 import { assert } from '../debug.js';
-import PopupView from './popup-view.js';
-import View from './view.js';
+import View, { ViewState } from './view.js';
 
-const FADE_TIME = 0.25;
+const layerList: ViewLayer[] = [];
 
-let currentView: View | null = null;
-let popupView: PopupView | null = null;
+let loadingIndicatorDrawFunc = drawDefaultLoadingIndicator;
 
-let pendingView: View | null = null;
-let tFade = 0;
-let transitionFunc: (() => boolean) | null = null;
+let didBecomeVisible = false;
 
-let isLoadingNextView = false;
-let tLoadingFade = 0;
+document.addEventListener('visibilitychange', () => { didBecomeVisible = (!document.hidden); });
+window.addEventListener('focus', () => {
+  layerList.forEach(layer => {
+    if (layer.view !== null && layer.view.state !== ViewState.Loading) {
+      layer.view?.onFocus?.();
+    }
+  });
+  updateEnabledStates();
+});
+window.addEventListener('blur', () => {
+  layerList.forEach(layer => {
+    if (layer.view !== null && layer.view.state !== ViewState.Loading) {
+      layer.view?.onBlur?.();
+    }
+  });
+  updateEnabledStates();
+});
 
-let drawCustomLoadingView: (() => void) | null = null;
+class ViewLayer {
+  view: View | null = null;
+  pendingView: View | null = null;
 
-let documentHadFocus = true;
-
-/**
- * A basic view manager that handles one view at a time, and one popup/overlay.
- */
-const ViewManager = {
-  get isInTransition(): boolean { return tFade < 1; },
-
-  get popupIsOpen(): boolean { return popupView !== null; },
-
-  /**
-   * Fades out the current view if any, then loads and fades into the next view.
-   * @param nextView The view to transition to next
-   */
   transitionTo(nextView: View): void {
-    assert(!(nextView instanceof PopupView), 'Transition failed, primary view cannot be a popup');
+    assert(this.view === null || this.view.state === ViewState.Active,
+      'View transition failed, already transitioning to another view',
+    );
 
-    // Even if there's already a pending view, or we're fading in, begin/continue fading out
-    pendingView = nextView;
-    transitionFunc = fadeOut;
-  },
+    if (this.view !== null) {
+      this.pendingView = nextView;
+      this.exitView();
+    } else {
+      this.view = nextView;
+      this.loadView();
+    }
+  }
 
-  /**
-   * Opens a popup view over the current primary view
-   * @param popup The popup to open
-   */
-  openPopup(popup: PopupView): void {
-    assert(popupView === null, 'Failed to open popup, one is already open');
-    assert(currentView !== null, 'Failed to open popup, transition to a view first');
+  exitView(): void {
+    if (this.view !== null) {
+      assert(this.view.state === ViewState.Active, 'Failed to exit view, still transitioning in');
+      this.view.state = ViewState.Exiting;
+      if (this.view.isEnabled) {
+        this.view.disable();
+      }
+    }
+  }
 
-    currentView.disable();
-    popupView = popup;
-    popupView.enable();
-  },
-
-  /**
-   * Closes the current popup view
-   */
-  closePopup(): void {
-    assert(popupView !== null, 'Failed to close popup, no popup to close');
-    assert(currentView !== null, 'Failed to close popup, transition to a view first');
-
-    popupView.dispose();
-    popupView = null;
-    currentView.enable();
-  },
-
-  /**
-   * Sets a custom loading view draw function. When waiting for a view's `loadContent` to execute, the given function
-   * will be called to draw a loading indicator to the screen. If no custom function is set, a default is used.
-   * @param drawLoadingView The function to call when rendering the loading view
-   */
-  setLoadingViewFunc(drawLoadingView: (() => void) | null): void {
-    drawCustomLoadingView = drawLoadingView;
-  },
-
-  /**
-   * Updates the current screen and popup, if set and focused, and updates transitions between screens.
-   */
   update(): void {
-    const documentHasFocus = document.hasFocus();
-    if (documentHasFocus !== documentHadFocus) {
-      documentHadFocus = documentHasFocus;
-      currentView?.onFocusChanged?.(documentHasFocus);
-      popupView?.onFocusChanged?.(documentHasFocus);
-    }
+    if (this.view === null) return;
 
-    if (transitionFunc?.() === true) {
-      transitionFunc = null;
+    switch (this.view.state) {
+      case ViewState.Entering: {
+        if (this.view.enterTime > 0 && this.view.transitionPos < 1) {
+          this.view.transitionPos += (deltaTime/1000) / this.view.enterTime;
+        } else {
+          this.view.state = ViewState.Active;
 
-      if (pendingView !== null) {
-        loadNextView();
+          onViewEntered();
+        }
+        break;
+      }
+      case ViewState.Exiting: {
+        if (this.view.exitTime > 0 && this.view.transitionPos > 0) {
+          this.view.transitionPos -= (deltaTime/1000) / this.view.exitTime;
+        } else {
+          this.view.dispose();
+
+          if (this.pendingView !== null) {
+            this.view = this.pendingView;
+            this.loadView();
+          }
+
+          onViewExited();
+        }
+        break;
       }
     }
 
-    if (!isLoadingNextView) {
-      currentView?.update?.();
-      popupView?.update?.();
+    if (this.view.state !== ViewState.Loading) {
+      this.view.update?.();
     }
+  }
+
+  draw(): void {
+    if (this.view === null) return;
+
+    push();
+    if (this.view.state === ViewState.Loading) {
+      if (this.view.drawLoadingIndicator !== undefined) {
+        this.view.drawLoadingIndicator();
+      } else {
+        loadingIndicatorDrawFunc();
+      }
+    } else {
+      this.view.draw();
+
+      if (
+        (this.view.state === ViewState.Entering && this.view.doEnterFade) ||
+        (this.view.state === ViewState.Exiting && this.view.doExitFade)
+      ) {
+        background(0, 255 * (1 - this.view.transitionPos));
+      }
+    }
+    pop();
+  }
+
+  async loadView(): Promise<void> {
+    assert(this.view !== null, 'Failed to load view, no view to load');
+    if (this.view.loadAssets !== undefined) {
+      this.view.state = ViewState.Loading;
+      await this.view.loadAssets();
+    }
+
+    this.view.state = ViewState.Entering;
+    this.view.init?.();
+    if (!document.hasFocus()) {
+      this.view.onBlur?.();
+    }
+}
+}
+
+const ViewManager = {
+  /**
+   * Sets the draw function to use for rendering a loading indicator between views, if the view doesn't define one.
+   */
+  setLoadingIndicatorDrawFunc(func: () => void): void {
+    loadingIndicatorDrawFunc = func;
   },
 
   /**
-   * Draws the current screen and popup, if set and visible, and draws transitions and loading views.
+   * Transitions to a new view, exiting the previous view if necessary
+   * @param view The view to transition to
+   * @param options.layer Specifies the layer index to push the view to
+   * NOTE: Apps could define a custom `Layer` enum to easily track and modify layers.
    */
+  transitionTo(view: View, { layer }: { layer: number } = { layer: 0 }): void {
+    assert(layerList.every(layer => layer.view === null || layer.view.state === ViewState.Active),
+      'View transition failed, a view is already transitioning',
+    );
+    assert(layer >= 0 && Number.isInteger(layer), 'View transition failed, layer must be a positive integer');
+    if (layerList[layer] === undefined) {
+      layerList[layer] = new ViewLayer();
+    }
+    layerList[layer]?.transitionTo(view);
+  },
+
+  /**
+   * Exits the given view, transitioning out and leaving its layer empty.
+   * @param view The view to exit
+   */
+  exitView(view: View): void {
+    const layer = layerList.find(layer => layer?.view === view);
+    assert(layer !== undefined, 'Failed to exit view, not found in view layers');
+    layer.exitView();
+  },
+
+  /**
+   * Exits the view on the given layer, if any.
+   * @param layer The layer to clear
+   */
+  clearLayer(layer: number): void {
+    layerList[layer]?.exitView();
+  },
+
+  update(): void {
+    // When the window is hidden (document.hidden) the browser stops running animation frames to save power; however,
+    // when the draw loop resumes, the first frame has a massive deltaTime (however long the window was hidden for).
+    // To correct this, on the first frame after becoming visible, overwrite deltaTime to a more reasonable value.
+    if (didBecomeVisible) {
+      didBecomeVisible = false;
+      deltaTime = 1000/60;
+    }
+
+    layerList.forEach(layer => layer?.update());
+  },
+
   draw(): void {
-    if (!isLoadingNextView) {
-      push();
-      currentView?.draw();
-      pop();
-
-      push();
-      popupView?.draw();
-      pop();
-    }
-
-    if (tFade < 1) {
-      background(0, 255 * (1 - tFade));
-    }
-
-    if (isLoadingNextView === true) {
-      if (currentView?.drawLoadingView !== undefined) {
-        currentView.drawLoadingView();
-      } else if (drawCustomLoadingView !== null) {
-        drawCustomLoadingView();
-      } else {
-        drawDefaultLoadingView();
-      }
-    }
+    layerList.forEach(layer => layer?.draw());
   },
 };
 
-async function loadNextView(): Promise<void> {
-  assert(pendingView !== null, 'Failed to load next view, no view is pending');
+function onViewEntered(): void { updateEnabledStates(); }
+function onViewExited(): void { updateEnabledStates(); }
 
-  isLoadingNextView = true;
-  tLoadingFade = 0;
+function updateEnabledStates(): void {
+  let isEnabled = document.hasFocus();
+  [...layerList].reverse().forEach(layer => {
+    if (layer === undefined || layer.view === null) return;
 
-  popupView?.dispose();
-  popupView = null;
+    isEnabled &&= (layer.view.state === ViewState.Active);
 
-  currentView?.dispose();
-  currentView = pendingView;
-  pendingView = null;
+    if (layer.view.isEnabled !== isEnabled) {
+      if (isEnabled) {
+        layer.view.enable();
+      } else {
+        layer.view.disable();
+      }
+    }
 
-  await currentView.loadContent?.();
-
-  currentView.enable();
-  isLoadingNextView = false;
-  transitionFunc = fadeIn;
+    isEnabled = false;
+  });
 }
 
-function fadeIn(): boolean {
-  tFade = min(1, tFade + (deltaTime/1000) / FADE_TIME);
-  return (tFade === 1);
-}
-
-function fadeOut(): boolean {
-  tFade = max(0, tFade - (deltaTime/1000) / FADE_TIME);
-  return (tFade === 0);
-}
-
-function drawDefaultLoadingView(): void {
-  tLoadingFade = min(1, tLoadingFade + (deltaTime/1000) / FADE_TIME);
-
+function drawDefaultLoadingIndicator(): void {
   push();
   {
+    background(0);
     textAlign(CENTER, CENTER);
     textSize(height/20);
     textStyle(BOLD);
-    fill(200, 255 * tLoadingFade).noStroke();
+    fill(200).noStroke();
     text('Loading...', width/2, height/2);
   }
   pop();
