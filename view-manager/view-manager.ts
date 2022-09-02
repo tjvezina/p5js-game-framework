@@ -124,7 +124,7 @@ class ViewLayer {
     if (!document.hasFocus()) {
       this.view.onBlur?.();
     }
-}
+  }
 }
 
 const ViewManager = {
@@ -169,6 +169,11 @@ const ViewManager = {
   clearLayer(layer: number): void {
     layerList[layer]?.exitView();
   },
+
+  /**
+   * A list of currently visible views
+   */
+  get views(): View[] { return layerList.map(layer => layer.view).filter(view => view !== null) as View[]; },
 
   update(): void {
     // When the window is hidden (document.hidden) the browser stops running animation frames to save power; however,
